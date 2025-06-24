@@ -10,7 +10,7 @@ CLASS_NAMES = sorted(['Patches', 'Pitted', 'Scratches', 'Rolled', 'Crazing', 'In
 
 def load_model():
   
-    model_path = hf_hub_download(repo_id="your_username/your_repo_name", filename="defect_model.h5")
+    model_path = hf_hub_download(repo_id="Ahmedhassan54/Defect_Detection_Model", filename="best_defect_model.h5")
     model = tf.keras.models.load_model(model_path)
     return model
 
