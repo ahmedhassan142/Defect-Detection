@@ -3,8 +3,12 @@ import sys
 import warnings
 import time
 import threading
+import numpy as np
+import cv2
+import gradio as gr
+from huggingface_hub import hf_hub_download
 
-# 1. COMPLETE SILENCE CONFIGURATION
+# 1. SILENCE ALL WARNINGS
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
@@ -26,20 +30,17 @@ with SuppressStderr():
     import absl.logging
     absl.logging.set_verbosity(absl.logging.ERROR)
 
-# 3. IMPORTS
-import numpy as np
-import cv2
-from huggingface_hub import hf_hub_download
-import gradio as gr
-
-# 4. CONFIGURATION
+# 3. CONFIGURATION
 CLASS_NAMES = ['Patches', 'Pitted', 'Scratches', 'Rolled', 'Crazing', 'Inclusion']
 MODEL_REPO = "Ahmedhassan54/Defect_Detection_Model"
 MODEL_FILE = "best_defect_model.h5"
 
-# 5. MODEL LOADING
+# 4. MODEL LOADING
+model = None
+model_ready = False
+
 def load_model():
-    """Load model with error handling"""
+    global model, model_ready
     try:
         tf.config.set_visible_devices([], 'GPU')
         model_path = hf_hub_download(
@@ -49,107 +50,133 @@ def load_model():
         )
         model = tf.keras.models.load_model(model_path, compile=False)
         model.trainable = False
-        # Warm up
+        # Warm up model
         dummy_input = np.zeros((1, 256, 256, 3), dtype=np.float32)
         model.predict(dummy_input, verbose=0)
-        return model
+        model_ready = True
+        print("Model loaded successfully")
     except Exception as e:
         print(f"Model loading failed: {str(e)}")
-        return None
 
-# 6. PRELOAD MODEL IN BACKGROUND
-model = None
-model_loaded = False
+# Load model in background
+threading.Thread(target=load_model, daemon=True).start()
 
-def load_model_background():
-    global model, model_loaded
-    model = load_model()
-    model_loaded = True
-
-threading.Thread(target=load_model_background, daemon=True).start()
-
-# 7. IMAGE PROCESSING
+# 5. IMAGE PROCESSING
 def preprocess_image(image):
-    """Fast image preprocessing"""
     if image is None:
         return None
         
-    if len(image.shape) == 2:
+    if len(image.shape) == 2:  # Grayscale
         image = np.stack((image,)*3, axis=-1)
-    elif image.shape[2] == 4:
+    elif image.shape[2] == 4:  # RGBA
         image = image[:, :, :3]
     
     image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
     return np.expand_dims(image.astype('float32') / 255.0, axis=0)
 
-# 8. PREDICTION FUNCTION
-def predict_defect(image, progress=gr.Progress()):
-    """Prediction with progress tracking"""
-    if not model_loaded:
-        progress(0, desc="Model still loading, please wait...")
-        return "Model loading...", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
+# 6. PREDICTION FUNCTION WITH IMMEDIATE FEEDBACK
+def predict_defect(image):
+    if not model_ready:
+        return "Model still loading...", 0, {
+            "x": CLASS_NAMES,
+            "y": [0]*len(CLASS_NAMES),
+            "title": "Loading model..."
+        }
     
-    progress(0.2, desc="Processing image...")
-    processed_image = preprocess_image(image)
-    if processed_image is None:
-        return "Invalid Image", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
-    
-    progress(0.5, desc="Analyzing defects...")
-    predictions = model.predict(processed_image, verbose=0)
-    scores = tf.nn.softmax(predictions[0]).numpy()
-    
-    progress(0.9, desc="Finalizing results...")
-    return (
-        CLASS_NAMES[np.argmax(scores)],
-        float(np.max(scores) * 100),
-        {"x": CLASS_NAMES, "y": [float(s) for s in scores]}
-    )
+    try:
+        processed_image = preprocess_image(image)
+        if processed_image is None:
+            return "Invalid image", 0, {
+                "x": CLASS_NAMES,
+                "y": [0]*len(CLASS_NAMES),
+                "title": "Error"
+            }
+        
+        predictions = model.predict(processed_image, verbose=0)
+        scores = tf.nn.softmax(predictions[0]).numpy()
+        
+        return (
+            CLASS_NAMES[np.argmax(scores)],
+            float(np.max(scores) * 100),
+            {
+                "x": CLASS_NAMES,
+                "y": [float(score) for score in scores],
+                "title": "Defect Probabilities"
+            }
+        )
+    except Exception as e:
+        print(f"Prediction error: {str(e)}")
+        return "Error during prediction", 0, {
+            "x": CLASS_NAMES,
+            "y": [0]*len(CLASS_NAMES),
+            "title": "Error"
+        }
 
-# 9. GRADIO INTERFACE
-with gr.Blocks() as demo:
+# 7. GRADIO INTERFACE WITH IMMEDIATE FEEDBACK
+with gr.Blocks(title="Steel Defect Detection") as demo:
     gr.Markdown("# 🏭 Steel Surface Defect Detection")
     
     with gr.Row():
         with gr.Column():
-            img_input = gr.Image(type="numpy", label="Upload Image")
-            btn = gr.Button("Detect Defect", variant="primary")
-            status = gr.Textbox(label="Status", value="Loading model...", interactive=False)
+            image_input = gr.Image(
+                label="Upload Steel Surface Image", 
+                type="numpy",
+                height=300
+            )
+            detect_btn = gr.Button(
+                "Detect Defect", 
+                variant="primary",
+                interactive=True
+            )
+            status_text = gr.Textbox(
+                label="Status",
+                value="Loading model..." if not model_ready else "Ready",
+                interactive=False
+            )
         
         with gr.Column():
-            label = gr.Label(label="Predicted Defect")
-            confidence = gr.Number(label="Confidence (%)")
-            plot = gr.BarPlot(
-                x=CLASS_NAMES, 
-                y=[0]*len(CLASS_NAMES),
-                label="Class Probabilities",
-                vertical=False
+            result_label = gr.Label(
+                label="Predicted Defect",
+                value="Waiting for input..."
             )
-
+            confidence_output = gr.Number(
+                label="Confidence Score (%)",
+                value=0,
+                minimum=0,
+                maximum=100
+            )
+            plot_output = gr.BarPlot(
+                x=CLASS_NAMES,
+                y=[0]*len(CLASS_NAMES),
+                label="Defect Probabilities",
+                vertical=False,
+                height=300
+            )
+    
     # Prediction function
-    btn.click(
+    detect_btn.click(
         fn=predict_defect,
-        inputs=img_input,
-        outputs=[label, confidence, plot],
-        show_progress="minimal"
+        inputs=image_input,
+        outputs=[result_label, confidence_output, plot_output],
+        api_name="predict"
     )
     
-    # Model status update
+    # Update status when model loads
     def update_status():
-        return "Model ready!" if model_loaded else "Loading model..."
+        return "Ready" if model_ready else "Loading model..."
     
-    # Use a separate thread to update status
-    def status_updater():
-        while not model_loaded:
-            time.sleep(1)
-            demo.queue().update(update_status, outputs=status)
-    
-    threading.Thread(target=status_updater, daemon=True).start()
+    demo.load(
+        fn=update_status,
+        outputs=status_text,
+        every=1
+    )
 
-# 10. LAUNCH APPLICATION
+# 8. LAUNCH APPLICATION
 if __name__ == "__main__":
     with SuppressStderr():
         demo.launch(
-          
+           
             server_port=7860,
-            show_error=False
+            show_error=True,
+            debug=False
         )
