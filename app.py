@@ -1,13 +1,14 @@
 import os
 import sys
 import warnings
-from functools import partial
+import time
+import threading
 
 # 1. COMPLETE SILENCE CONFIGURATION
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress ALL TensorFlow output
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Completely disable GPU
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN optimizations
-warnings.filterwarnings('ignore')  # Suppress Python warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+warnings.filterwarnings('ignore')
 
 # 2. SILENT TENSORFLOW IMPORT
 class SuppressStderr:
@@ -30,44 +31,42 @@ import numpy as np
 import cv2
 from huggingface_hub import hf_hub_download
 import gradio as gr
-import time
 
 # 4. CONFIGURATION
 CLASS_NAMES = ['Patches', 'Pitted', 'Scratches', 'Rolled', 'Crazing', 'Inclusion']
 MODEL_REPO = "Ahmedhassan54/Defect_Detection_Model"
 MODEL_FILE = "best_defect_model.h5"
 
-# 5. MODEL LOADING WITH PROGRESS
+# 5. MODEL LOADING
 def load_model():
-    """Load model with progress feedback"""
-    # Disable GPU
-    tf.config.set_visible_devices([], 'GPU')
-    
-    # Download model (removed 'quiet' parameter)
-    model_path = hf_hub_download(
-        repo_id=MODEL_REPO,
-        filename=MODEL_FILE,
-        cache_dir="model_cache"
-    )
-    
-    # Load model
-    model = tf.keras.models.load_model(model_path, compile=False)
-    model.trainable = False
-    
-    # Warm up
-    dummy_input = np.zeros((1, 256, 256, 3), dtype=np.float32)
-    model.predict(dummy_input, verbose=0)
-    
-    return model
+    """Load model with error handling"""
+    try:
+        tf.config.set_visible_devices([], 'GPU')
+        model_path = hf_hub_download(
+            repo_id=MODEL_REPO,
+            filename=MODEL_FILE,
+            cache_dir="model_cache"
+        )
+        model = tf.keras.models.load_model(model_path, compile=False)
+        model.trainable = False
+        # Warm up
+        dummy_input = np.zeros((1, 256, 256, 3), dtype=np.float32)
+        model.predict(dummy_input, verbose=0)
+        return model
+    except Exception as e:
+        print(f"Model loading failed: {str(e)}")
+        return None
 
 # 6. PRELOAD MODEL IN BACKGROUND
-def load_model_async():
-    global model
-    model = load_model()
-
 model = None
-import threading
-threading.Thread(target=load_model_async, daemon=True).start()
+model_loaded = False
+
+def load_model_background():
+    global model, model_loaded
+    model = load_model()
+    model_loaded = True
+
+threading.Thread(target=load_model_background, daemon=True).start()
 
 # 7. IMAGE PROCESSING
 def preprocess_image(image):
@@ -75,24 +74,20 @@ def preprocess_image(image):
     if image is None:
         return None
         
-    if len(image.shape) == 2:  # Grayscale
+    if len(image.shape) == 2:
         image = np.stack((image,)*3, axis=-1)
-    elif image.shape[2] == 4:  # RGBA
+    elif image.shape[2] == 4:
         image = image[:, :, :3]
     
     image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
     return np.expand_dims(image.astype('float32') / 255.0, axis=0)
 
-# 8. PREDICTION WITH PROGRESS
+# 8. PREDICTION FUNCTION
 def predict_defect(image, progress=gr.Progress()):
-    """Prediction with real-time feedback"""
-    progress(0, desc="Starting...")
-    
-    if model is None:
-        progress(0.5, desc="Model still loading...")
-        time.sleep(1)  # Give model more time to load
-        if model is None:
-            return "Model not ready", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
+    """Prediction with progress tracking"""
+    if not model_loaded:
+        progress(0, desc="Model still loading, please wait...")
+        return "Model loading...", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
     
     progress(0.2, desc="Processing image...")
     processed_image = preprocess_image(image)
@@ -110,7 +105,7 @@ def predict_defect(image, progress=gr.Progress()):
         {"x": CLASS_NAMES, "y": [float(s) for s in scores]}
     )
 
-# 9. GRADIO INTERFACE WITH STATUS
+# 9. GRADIO INTERFACE
 with gr.Blocks() as demo:
     gr.Markdown("# 🏭 Steel Surface Defect Detection")
     
@@ -118,39 +113,43 @@ with gr.Blocks() as demo:
         with gr.Column():
             img_input = gr.Image(type="numpy", label="Upload Image")
             btn = gr.Button("Detect Defect", variant="primary")
-            status = gr.Textbox(label="Status", interactive=False)
+            status = gr.Textbox(label="Status", value="Loading model...", interactive=False)
         
         with gr.Column():
             label = gr.Label(label="Predicted Defect")
             confidence = gr.Number(label="Confidence (%)")
-            plot = gr.BarPlot(x=CLASS_NAMES, y=[0]*len(CLASS_NAMES), 
-                            label="Class Probabilities", vertical=False)
+            plot = gr.BarPlot(
+                x=CLASS_NAMES, 
+                y=[0]*len(CLASS_NAMES),
+                label="Class Probabilities",
+                vertical=False
+            )
 
-    # Prediction with status updates
+    # Prediction function
     btn.click(
         fn=predict_defect,
         inputs=img_input,
         outputs=[label, confidence, plot],
-        api_name="predict",
-        show_progress="full"
+        show_progress="minimal"
     )
     
-    # Model loading status check
-    def check_model_status():
-        return "Model ready!" if model is not None else "Loading model..."
+    # Model status update
+    def update_status():
+        return "Model ready!" if model_loaded else "Loading model..."
     
-    demo.load(
-        fn=check_model_status,
-        outputs=status,
-        every=1
-    )
+    # Use a separate thread to update status
+    def status_updater():
+        while not model_loaded:
+            time.sleep(1)
+            demo.queue().update(update_status, outputs=status)
+    
+    threading.Thread(target=status_updater, daemon=True).start()
 
 # 10. LAUNCH APPLICATION
 if __name__ == "__main__":
     with SuppressStderr():
         demo.launch(
-            server_name="0.0.0.0",
+          
             server_port=7860,
-            show_error=False,
-            debug=False
+            show_error=False
         )
