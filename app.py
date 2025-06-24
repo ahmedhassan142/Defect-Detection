@@ -1,43 +1,58 @@
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress ALL TensorFlow messages
+import sys
+import warnings
+
+# 1. COMPLETE SILENCE - Suppress ALL possible warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress ALL TensorFlow output
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Completely disable GPU
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN optimizations
+warnings.filterwarnings('ignore')  # Suppress Python warnings
 
-# Import TensorFlow after setting environment variables
-import tensorflow as tf
-tf.autograph.set_verbosity(0)  # Disable autograph warnings
-tf.get_logger().setLevel('ERROR')  # Only show errors
+# 2. Redirect stderr to suppress remaining TensorFlow messages
+class SuppressStderr:
+    def __enter__(self):
+        self.original_stderr = sys.stderr
+        sys.stderr = open(os.devnull, 'w')
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stderr.close()
+        sys.stderr = self.original_stderr
 
-# Now import other dependencies
-import gradio as gr
+with SuppressStderr():
+    import tensorflow as tf
+    tf.autograph.set_verbosity(0)
+    tf.get_logger().setLevel('ERROR')
+    import absl.logging
+    absl.logging.set_verbosity(absl.logging.ERROR)
+
+# 3. Now import other dependencies quietly
 import numpy as np
 import cv2
 from huggingface_hub import hf_hub_download
-import logging
-logging.basicConfig(level=logging.ERROR)  # Only log errors
+import gradio as gr
 
-# Configuration
+# 4. Configuration
 CLASS_NAMES = ['Patches', 'Pitted', 'Scratches', 'Rolled', 'Crazing', 'Inclusion']
 MODEL_REPO = "Ahmedhassan54/Defect_Detection_Model"
 MODEL_FILE = "best_defect_model.h5"
 
+# 5. Model Loading with Complete CPU Isolation
 def load_model():
-    """Load model with complete CPU isolation"""
-    # Force CPU-only operation
-    tf.config.set_visible_devices([], 'GPU')
+    """Silent model loading with CPU optimizations"""
+    tf.config.set_visible_devices([], 'GPU')  # Explicitly disable GPU
     
-    # Download model
+    # Download model silently
     model_path = hf_hub_download(
         repo_id=MODEL_REPO,
         filename=MODEL_FILE,
-        cache_dir="model_cache"
+        cache_dir="model_cache",
+        quiet=True  # Suppress download progress
     )
     
-    # Load with CPU optimizations
+    # Load model with CPU optimizations
     model = tf.keras.models.load_model(model_path, compile=False)
     model.trainable = False
     
-    # Warm up model
+    # Warm up model silently
     dummy_input = np.zeros((1, 256, 256, 3), dtype=np.float32)
     model.predict(dummy_input, verbose=0)
     
@@ -45,8 +60,9 @@ def load_model():
 
 model = load_model()
 
+# 6. Image Processing
 def preprocess_image(image):
-    """Optimized CPU image processing"""
+    """Silent image preprocessing"""
     if image is None:
         return None
         
@@ -58,8 +74,9 @@ def preprocess_image(image):
     image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
     return np.expand_dims(image.astype('float32') / 255.0, axis=0)
 
+# 7. Prediction Function
 def predict_defect(image):
-    """Silent prediction function"""
+    """Completely silent prediction"""
     try:
         processed_image = preprocess_image(image)
         if processed_image is None:
@@ -76,7 +93,7 @@ def predict_defect(image):
     except Exception:
         return "Error", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
 
-# Create interface
+# 8. Create Interface
 with gr.Blocks() as demo:
     gr.Markdown("# 🏭 Steel Surface Defect Detection")
     
@@ -92,14 +109,14 @@ with gr.Blocks() as demo:
 
     btn.click(predict_defect, inputs=img_input, outputs=[label, confidence, plot])
 
+# 9. Silent Launch
 if __name__ == "__main__":
-    # Launch with minimal logging
-    import absl.logging
-    absl.logging.set_verbosity(absl.logging.ERROR)
-    
-    demo.launch(
-       
-        server_port=7860,
-        show_error=False,
-        debug=False
-    )
+    # Final suppression of any remaining messages
+    with SuppressStderr():
+        demo.launch(
+          
+            server_port=7860,
+            show_error=False,
+            debug=False,
+            quiet=True  # Suppress Gradio startup messages
+        )
