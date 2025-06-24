@@ -1,14 +1,15 @@
 import os
 import sys
 import warnings
+from functools import partial
 
-# 1. COMPLETE SILENCE - Suppress ALL possible warnings
+# 1. COMPLETE SILENCE CONFIGURATION
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress ALL TensorFlow output
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Completely disable GPU
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN optimizations
 warnings.filterwarnings('ignore')  # Suppress Python warnings
 
-# 2. Redirect stderr to suppress remaining TensorFlow messages
+# 2. SILENT TENSORFLOW IMPORT
 class SuppressStderr:
     def __enter__(self):
         self.original_stderr = sys.stderr
@@ -24,45 +25,53 @@ with SuppressStderr():
     import absl.logging
     absl.logging.set_verbosity(absl.logging.ERROR)
 
-# 3. Now import other dependencies quietly
+# 3. IMPORTS
 import numpy as np
 import cv2
 from huggingface_hub import hf_hub_download
 import gradio as gr
+import time
 
-# 4. Configuration
+# 4. CONFIGURATION
 CLASS_NAMES = ['Patches', 'Pitted', 'Scratches', 'Rolled', 'Crazing', 'Inclusion']
 MODEL_REPO = "Ahmedhassan54/Defect_Detection_Model"
 MODEL_FILE = "best_defect_model.h5"
 
-# 5. Model Loading with Complete CPU Isolation
+# 5. MODEL LOADING WITH PROGRESS
 def load_model():
-    """Silent model loading with CPU optimizations"""
-    tf.config.set_visible_devices([], 'GPU')  # Explicitly disable GPU
+    """Load model with progress feedback"""
+    # Disable GPU
+    tf.config.set_visible_devices([], 'GPU')
     
-    # Download model silently
+    # Download model (removed 'quiet' parameter)
     model_path = hf_hub_download(
         repo_id=MODEL_REPO,
         filename=MODEL_FILE,
-        cache_dir="model_cache",
-        quiet=True  # Suppress download progress
+        cache_dir="model_cache"
     )
     
-    # Load model with CPU optimizations
+    # Load model
     model = tf.keras.models.load_model(model_path, compile=False)
     model.trainable = False
     
-    # Warm up model silently
+    # Warm up
     dummy_input = np.zeros((1, 256, 256, 3), dtype=np.float32)
     model.predict(dummy_input, verbose=0)
     
     return model
 
-model = load_model()
+# 6. PRELOAD MODEL IN BACKGROUND
+def load_model_async():
+    global model
+    model = load_model()
 
-# 6. Image Processing
+model = None
+import threading
+threading.Thread(target=load_model_async, daemon=True).start()
+
+# 7. IMAGE PROCESSING
 def preprocess_image(image):
-    """Silent image preprocessing"""
+    """Fast image preprocessing"""
     if image is None:
         return None
         
@@ -74,49 +83,74 @@ def preprocess_image(image):
     image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
     return np.expand_dims(image.astype('float32') / 255.0, axis=0)
 
-# 7. Prediction Function
-def predict_defect(image):
-    """Completely silent prediction"""
-    try:
-        processed_image = preprocess_image(image)
-        if processed_image is None:
-            return "Invalid Image", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
-        
-        predictions = model.predict(processed_image, verbose=0)
-        scores = tf.nn.softmax(predictions[0]).numpy()
-        
-        return (
-            CLASS_NAMES[np.argmax(scores)],
-            float(np.max(scores) * 100),
-            {"x": CLASS_NAMES, "y": [float(s) for s in scores]}
-        )
-    except Exception:
-        return "Error", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
+# 8. PREDICTION WITH PROGRESS
+def predict_defect(image, progress=gr.Progress()):
+    """Prediction with real-time feedback"""
+    progress(0, desc="Starting...")
+    
+    if model is None:
+        progress(0.5, desc="Model still loading...")
+        time.sleep(1)  # Give model more time to load
+        if model is None:
+            return "Model not ready", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
+    
+    progress(0.2, desc="Processing image...")
+    processed_image = preprocess_image(image)
+    if processed_image is None:
+        return "Invalid Image", 0, {"x": CLASS_NAMES, "y": [0]*len(CLASS_NAMES)}
+    
+    progress(0.5, desc="Analyzing defects...")
+    predictions = model.predict(processed_image, verbose=0)
+    scores = tf.nn.softmax(predictions[0]).numpy()
+    
+    progress(0.9, desc="Finalizing results...")
+    return (
+        CLASS_NAMES[np.argmax(scores)],
+        float(np.max(scores) * 100),
+        {"x": CLASS_NAMES, "y": [float(s) for s in scores]}
+    )
 
-# 8. Create Interface
+# 9. GRADIO INTERFACE WITH STATUS
 with gr.Blocks() as demo:
     gr.Markdown("# 🏭 Steel Surface Defect Detection")
     
     with gr.Row():
         with gr.Column():
-            img_input = gr.Image(type="numpy")
-            btn = gr.Button("Detect Defect")
+            img_input = gr.Image(type="numpy", label="Upload Image")
+            btn = gr.Button("Detect Defect", variant="primary")
+            status = gr.Textbox(label="Status", interactive=False)
         
         with gr.Column():
-            label = gr.Label()
+            label = gr.Label(label="Predicted Defect")
             confidence = gr.Number(label="Confidence (%)")
-            plot = gr.BarPlot(x=CLASS_NAMES, y=[0]*len(CLASS_NAMES), vertical=False)
+            plot = gr.BarPlot(x=CLASS_NAMES, y=[0]*len(CLASS_NAMES), 
+                            label="Class Probabilities", vertical=False)
 
-    btn.click(predict_defect, inputs=img_input, outputs=[label, confidence, plot])
+    # Prediction with status updates
+    btn.click(
+        fn=predict_defect,
+        inputs=img_input,
+        outputs=[label, confidence, plot],
+        api_name="predict",
+        show_progress="full"
+    )
+    
+    # Model loading status check
+    def check_model_status():
+        return "Model ready!" if model is not None else "Loading model..."
+    
+    demo.load(
+        fn=check_model_status,
+        outputs=status,
+        every=1
+    )
 
-# 9. Silent Launch
+# 10. LAUNCH APPLICATION
 if __name__ == "__main__":
-    # Final suppression of any remaining messages
     with SuppressStderr():
         demo.launch(
-          
+            server_name="0.0.0.0",
             server_port=7860,
             show_error=False,
-            debug=False,
-            quiet=True  # Suppress Gradio startup messages
+            debug=False
         )
