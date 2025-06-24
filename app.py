@@ -8,7 +8,7 @@ import cv2
 import gradio as gr
 from huggingface_hub import hf_hub_download
 
-# 1. SILENCE ALL WARNINGS
+# 1. COMPLETE SILENCE CONFIGURATION
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
@@ -38,9 +38,10 @@ MODEL_FILE = "best_defect_model.h5"
 # 4. MODEL LOADING
 model = None
 model_ready = False
+status_message = "Loading model..."
 
 def load_model():
-    global model, model_ready
+    global model, model_ready, status_message
     try:
         tf.config.set_visible_devices([], 'GPU')
         model_path = hf_hub_download(
@@ -54,9 +55,11 @@ def load_model():
         dummy_input = np.zeros((1, 256, 256, 3), dtype=np.float32)
         model.predict(dummy_input, verbose=0)
         model_ready = True
+        status_message = "Model ready!"
         print("Model loaded successfully")
     except Exception as e:
-        print(f"Model loading failed: {str(e)}")
+        status_message = f"Model loading failed: {str(e)}"
+        print(status_message)
 
 # Load model in background
 threading.Thread(target=load_model, daemon=True).start()
@@ -74,13 +77,13 @@ def preprocess_image(image):
     image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
     return np.expand_dims(image.astype('float32') / 255.0, axis=0)
 
-# 6. PREDICTION FUNCTION WITH IMMEDIATE FEEDBACK
+# 6. PREDICTION FUNCTION
 def predict_defect(image):
     if not model_ready:
         return "Model still loading...", 0, {
             "x": CLASS_NAMES,
             "y": [0]*len(CLASS_NAMES),
-            "title": "Loading model..."
+            "title": "Loading..."
         }
     
     try:
@@ -112,7 +115,11 @@ def predict_defect(image):
             "title": "Error"
         }
 
-# 7. GRADIO INTERFACE WITH IMMEDIATE FEEDBACK
+# 7. STATUS UPDATER FUNCTION
+def get_status():
+    return status_message
+
+# 8. GRADIO INTERFACE
 with gr.Blocks(title="Steel Defect Detection") as demo:
     gr.Markdown("# 🏭 Steel Surface Defect Detection")
     
@@ -130,7 +137,7 @@ with gr.Blocks(title="Steel Defect Detection") as demo:
             )
             status_text = gr.Textbox(
                 label="Status",
-                value="Loading model..." if not model_ready else "Ready",
+                value=status_message,
                 interactive=False
             )
         
@@ -161,21 +168,22 @@ with gr.Blocks(title="Steel Defect Detection") as demo:
         api_name="predict"
     )
     
-    # Update status when model loads
+    # Manual status updates using a separate thread
     def update_status():
-        return "Ready" if model_ready else "Loading model..."
+        while True:
+            time.sleep(1)
+            demo.queue().update(
+                fn=get_status,
+                outputs=status_text
+            )
     
-    demo.load(
-        fn=update_status,
-        outputs=status_text,
-        every=1
-    )
+    threading.Thread(target=update_status, daemon=True).start()
 
-# 8. LAUNCH APPLICATION
+# 9. LAUNCH APPLICATION
 if __name__ == "__main__":
     with SuppressStderr():
         demo.launch(
-           
+            server_name="0.0.0.0",
             server_port=7860,
             show_error=True,
             debug=False
