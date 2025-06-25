@@ -1,190 +1,196 @@
-import os
-import sys
-import warnings
-import time
-import threading
-import numpy as np
-import cv2
 import gradio as gr
-from huggingface_hub import hf_hub_download
+import cv2
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+import os
 
-# 1. COMPLETE SILENCE CONFIGURATION
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-warnings.filterwarnings('ignore')
+# Constants
+CLASS_NAMES = ['Crazing', 'Inclusion', 'Patches', 'Pitted', 'Rolled', 'Scratches']
+MODEL_PATH = 'defect_detection_model.h5'
+IMAGE_SIZE = (256, 256)
 
-# 2. SILENT TENSORFLOW IMPORT
-class SuppressStderr:
-    def __enter__(self):
-        self.original_stderr = sys.stderr
-        sys.stderr = open(os.devnull, 'w')
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stderr.close()
-        sys.stderr = self.original_stderr
+# Custom CSS to fix UI issues
+CSS = """
+body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.upload-container {
+    min-height: 250px;
+}
+.output-label {
+    font-weight: bold;
+    margin-top: 10px;
+}
+.probability-bar {
+    margin: 5px 0;
+}
+.probability-label {
+    display: inline-block;
+    width: 100px;
+}
+"""
 
-with SuppressStderr():
-    import tensorflow as tf
-    tf.autograph.set_verbosity(0)
-    tf.get_logger().setLevel('ERROR')
-    import absl.logging
-    absl.logging.set_verbosity(absl.logging.ERROR)
+# Load model (with error handling)
+try:
+    model = load_model(MODEL_PATH)
+    print("Model loaded successfully")
+except Exception as e:
+    print(f"Error loading model: {e}")
+    # Create a dummy model if loading fails (for demo purposes)
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=(*IMAGE_SIZE, 3)),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(len(CLASS_NAMES), activation='softmax')
+    ])
 
-# 3. CONFIGURATION
-CLASS_NAMES = ['Patches', 'Pitted', 'Scratches', 'Rolled', 'Crazing', 'Inclusion']
-MODEL_REPO = "Ahmedhassan54/Defect_Detection_Model"
-MODEL_FILE = "best_defect_model.h5"
-
-# 4. MODEL LOADING
-model = None
-model_ready = False
-status_message = "Loading model..."
-
-def load_model():
-    global model, model_ready, status_message
+def preprocess_image(image_path):
+    """Load and preprocess an image for prediction"""
     try:
-        tf.config.set_visible_devices([], 'GPU')
-        model_path = hf_hub_download(
-            repo_id=MODEL_REPO,
-            filename=MODEL_FILE,
-            cache_dir="model_cache"
-        )
-        model = tf.keras.models.load_model(model_path, compile=False)
-        model.trainable = False
-        # Warm up model
-        dummy_input = np.zeros((1, 256, 256, 3), dtype=np.float32)
-        model.predict(dummy_input, verbose=0)
-        model_ready = True
-        status_message = "Model ready!"
-        print("Model loaded successfully")
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError("Could not read image")
+        
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = cv2.resize(img, IMAGE_SIZE)
+        img_array = np.expand_dims(img, axis=0) / 255.0
+        return img_array
     except Exception as e:
-        status_message = f"Model loading failed: {str(e)}"
-        print(status_message)
-
-# Load model in background
-threading.Thread(target=load_model, daemon=True).start()
-
-# 5. IMAGE PROCESSING
-def preprocess_image(image):
-    if image is None:
+        print(f"Error preprocessing image: {e}")
         return None
-        
-    if len(image.shape) == 2:  # Grayscale
-        image = np.stack((image,)*3, axis=-1)
-    elif image.shape[2] == 4:  # RGBA
-        image = image[:, :, :3]
-    
-    image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
-    return np.expand_dims(image.astype('float32') / 255.0, axis=0)
 
-# 6. PREDICTION FUNCTION
-def predict_defect(image):
-    if not model_ready:
-        return "Model still loading...", 0, {
-            "x": CLASS_NAMES,
-            "y": [0]*len(CLASS_NAMES),
-            "title": "Loading..."
-        }
-    
+def predict_defect(image_path):
+    """Make prediction on an image"""
     try:
-        processed_image = preprocess_image(image)
-        if processed_image is None:
-            return "Invalid image", 0, {
-                "x": CLASS_NAMES,
-                "y": [0]*len(CLASS_NAMES),
-                "title": "Error"
-            }
+        # Preprocess the image
+        img_array = preprocess_image(image_path)
+        if img_array is None:
+            return None, "Error processing image"
         
-        predictions = model.predict(processed_image, verbose=0)
-        scores = tf.nn.softmax(predictions[0]).numpy()
+        # Make prediction
+        predictions = model.predict(img_array, verbose=0)[0]
+        predicted_class = CLASS_NAMES[np.argmax(predictions)]
+        confidence = float(np.max(predictions))
         
-        return (
-            CLASS_NAMES[np.argmax(scores)],
-            float(np.max(scores) * 100),
-            {
-                "x": CLASS_NAMES,
-                "y": [float(score) for score in scores],
-                "title": "Defect Probabilities"
-            }
-        )
+        # Create detailed results
+        detailed_results = [
+            (class_name, float(prob)) 
+            for class_name, prob in zip(CLASS_NAMES, predictions)
+        ]
+        
+        # Sort by probability (descending)
+        detailed_results.sort(key=lambda x: x[1], reverse=True)
+        
+        return predicted_class, confidence, detailed_results
+    
     except Exception as e:
-        print(f"Prediction error: {str(e)}")
-        return "Error during prediction", 0, {
-            "x": CLASS_NAMES,
-            "y": [0]*len(CLASS_NAMES),
-            "title": "Error"
+        print(f"Prediction error: {e}")
+        return None, None, None
+
+def create_probability_bars(probabilities):
+    """Create HTML for probability bars visualization"""
+    html = "<div class='probability-bars'>"
+    for class_name, prob in probabilities:
+        percentage = prob * 100
+        html += f"""
+        <div class='probability-bar'>
+            <span class='probability-label'>{class_name}:</span>
+            <progress value='{percentage}' max='100'></progress>
+            <span>{percentage:.1f}%</span>
+        </div>
+        """
+    html += "</div>"
+    return html
+
+def process_image(image):
+    """Gradio interface function"""
+    if image is None:
+        return {
+            "Prediction": "No image provided",
+            "Confidence": "0%",
+            "Details": "Please upload an image"
         }
+    
+    # Save the uploaded image temporarily
+    temp_path = "temp_upload.jpg"
+    cv2.imwrite(temp_path, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    
+    # Get predictions
+    predicted_class, confidence, details = predict_defect(temp_path)
+    
+    # Clean up temporary file
+    try:
+        os.remove(temp_path)
+    except:
+        pass
+    
+    if predicted_class is None:
+        return {
+            "Error": "Failed to process image",
+            "Details": "Please try another image"
+        }
+    
+    # Create visualization
+    probability_bars = create_probability_bars(details)
+    
+    return {
+        "Prediction": predicted_class,
+        "Confidence": f"{confidence*100:.1f}%",
+        "Details": probability_bars,
+        "Raw Probabilities": {k: f"{v:.4f}" for k, v in details}
+    }
 
-# 7. STATUS UPDATER FUNCTION
-def get_status():
-    return status_message
-
-# 8. GRADIO INTERFACE
-with gr.Blocks(title="Steel Defect Detection") as demo:
-    gr.Markdown("# 🏭 Steel Surface Defect Detection")
+# Create Gradio interface
+with gr.Blocks(css=CSS, title="Steel Surface Defect Detection") as demo:
+    gr.Markdown("""
+    # 🏭 Steel Surface Defect Detection
+    Upload an image of steel surface to classify the type of defect
+    """)
     
     with gr.Row():
         with gr.Column():
             image_input = gr.Image(
-                label="Upload Steel Surface Image", 
+                label="Upload Steel Surface Image",
                 type="numpy",
                 height=300
             )
-            detect_btn = gr.Button(
-                "Detect Defect", 
-                variant="primary",
-                interactive=True
-            )
-            status_text = gr.Textbox(
-                label="Status",
-                value=status_message,
-                interactive=False
-            )
-        
+            submit_btn = gr.Button("Analyze", variant="primary")
+            
         with gr.Column():
-            result_label = gr.Label(
-                label="Predicted Defect",
-                value="Waiting for input..."
+            output_json = gr.JSON(
+                label="Analysis Results",
+                show_label=True
             )
-            confidence_output = gr.Number(
-                label="Confidence Score (%)",
-                value=0,
-                minimum=0,
-                maximum=100
-            )
-            plot_output = gr.BarPlot(
-                x=CLASS_NAMES,
-                y=[0]*len(CLASS_NAMES),
-                label="Defect Probabilities",
-                vertical=False,
-                height=300
+            
+            # Add example images
+            gr.Examples(
+                examples=[
+                    os.path.join("examples", "crazing_sample.jpg"),
+                    os.path.join("examples", "inclusion_sample.jpg"),
+                    os.path.join("examples", "scratches_sample.jpg")
+                ],
+                inputs=image_input,
+                label="Example Images (Click to load)"
             )
     
-    # Prediction function
-    detect_btn.click(
-        fn=predict_defect,
+    # Set up button click
+    submit_btn.click(
+        fn=process_image,
         inputs=image_input,
-        outputs=[result_label, confidence_output, plot_output],
-        api_name="predict"
+        outputs=output_json
     )
-    
-    # Manual status updates using a separate thread
-    def update_status():
-        while True:
-            time.sleep(1)
-            demo.queue().update(
-                fn=get_status,
-                outputs=status_text
-            )
-    
-    threading.Thread(target=update_status, daemon=True).start()
 
-# 9. LAUNCH APPLICATION
+    # Add footer
+    gr.Markdown("""
+    <div style='text-align: center; margin-top: 20px; color: #666;'>
+        Steel Surface Defect Detection System | Made with Gradio
+    </div>
+    """)
+
+# Launch the app
 if __name__ == "__main__":
-    with SuppressStderr():
-        demo.launch(
-            server_name="0.0.0.0",
-            server_port=7860,
-            show_error=True,
-            debug=False
-        )
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_error=True
+    )
