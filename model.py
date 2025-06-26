@@ -17,7 +17,7 @@ import time
 
 
 class ProgressFileUpload:
-    """Custom file upload with progress bar"""
+   
     def __init__(self, filename, total_size):
         self.filename = filename
         self.total_size = total_size
@@ -41,7 +41,7 @@ class DefectDetectorTF:
         self.model = self.build_model()
     
     def build_model(self):
-        """Build an enhanced CNN model for 6 defect types"""
+        
         model = models.Sequential([
             layers.Rescaling(1./255, input_shape=self.input_shape),
             
@@ -79,7 +79,7 @@ class DefectDetectorTF:
         return model
     
     def load_dataset(self, dataset_dir):
-        """Load all image formats from each class folder"""
+        
         images = []
         labels = []
         supported_formats = ('.jpg', '.jpeg', '.png', '.bmp')
@@ -110,7 +110,7 @@ class DefectDetectorTF:
         return np.array(images), np.array(labels)
     
     def save_model_with_progress(self, filepath):
-        """Save model with progress tracking"""
+       
        
         class ProgressTracker(tf.keras.callbacks.Callback):
             def __init__(self, total_size):
@@ -138,7 +138,7 @@ class DefectDetectorTF:
         print("\nModel saved successfully!")
     
     def train(self, dataset_dir, epochs=30, batch_size=32):
-        """Train with data augmentation"""
+       
         X, y = self.load_dataset(dataset_dir)
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
         
@@ -197,7 +197,7 @@ class DefectDetectorTF:
         return history
     
     def predict(self, image_path):
-        """Predict on any image format"""
+       
         img = cv2.imread(image_path)
         if img is None:
             return None, "Failed to load image"
@@ -329,7 +329,7 @@ print("### Steel Surface Defect Detection - Testing ###")
 print("#" * 60)
 
 def test_model_with_zip(test_zip_path, model_path, detector):
-    """Test the model with a zip file containing test images"""
+    
    
     test_dir = '/content/project_files/test_dataset'
     os.makedirs(test_dir, exist_ok=True)
