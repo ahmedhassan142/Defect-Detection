@@ -5,7 +5,7 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 import os
 
-# Constants
+
 CLASS_NAMES = ['Crazing', 'Inclusion', 'Patches', 'Pitted', 'Rolled', 'Scratches']
 MODEL_PATH = 'defect_detection_model.h5'
 IMAGE_SIZE = (256, 256)
@@ -31,13 +31,13 @@ body {
 }
 """
 
-# Load model (with error handling)
+
 try:
     model = load_model(MODEL_PATH)
     print("Model loaded successfully")
 except Exception as e:
     print(f"Error loading model: {e}")
-    # Create a dummy model if loading fails (for demo purposes)
+   
     model = tf.keras.Sequential([
         tf.keras.layers.InputLayer(input_shape=(*IMAGE_SIZE, 3)),
         tf.keras.layers.Flatten(),
@@ -45,7 +45,7 @@ except Exception as e:
     ])
 
 def preprocess_image(image_path):
-    """Load and preprocess an image for prediction"""
+    
     try:
         img = cv2.imread(image_path)
         if img is None:
@@ -60,25 +60,25 @@ def preprocess_image(image_path):
         return None
 
 def predict_defect(image_path):
-    """Make prediction on an image"""
+  
     try:
-        # Preprocess the image
+      
         img_array = preprocess_image(image_path)
         if img_array is None:
             return None, "Error processing image"
         
-        # Make prediction
+       
         predictions = model.predict(img_array, verbose=0)[0]
         predicted_class = CLASS_NAMES[np.argmax(predictions)]
         confidence = float(np.max(predictions))
         
-        # Create detailed results
+       
         detailed_results = [
             (class_name, float(prob)) 
             for class_name, prob in zip(CLASS_NAMES, predictions)
         ]
         
-        # Sort by probability (descending)
+        
         detailed_results.sort(key=lambda x: x[1], reverse=True)
         
         return predicted_class, confidence, detailed_results
@@ -88,7 +88,7 @@ def predict_defect(image_path):
         return None, None, None
 
 def create_probability_bars(probabilities):
-    """Create HTML for probability bars visualization"""
+    
     html = "<div class='probability-bars'>"
     for class_name, prob in probabilities:
         percentage = prob * 100
@@ -103,7 +103,7 @@ def create_probability_bars(probabilities):
     return html
 
 def process_image(image):
-    """Gradio interface function"""
+   
     if image is None:
         return {
             "Prediction": "No image provided",
@@ -111,14 +111,13 @@ def process_image(image):
             "Details": "Please upload an image"
         }
     
-    # Save the uploaded image temporarily
+    
     temp_path = "temp_upload.jpg"
     cv2.imwrite(temp_path, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
-    
-    # Get predictions
+   
     predicted_class, confidence, details = predict_defect(temp_path)
     
-    # Clean up temporary file
+   
     try:
         os.remove(temp_path)
     except:
@@ -130,7 +129,7 @@ def process_image(image):
             "Details": "Please try another image"
         }
     
-    # Create visualization
+ 
     probability_bars = create_probability_bars(details)
     
     return {
@@ -140,7 +139,7 @@ def process_image(image):
         "Raw Probabilities": {k: f"{v:.4f}" for k, v in details}
     }
 
-# Create Gradio interface
+
 with gr.Blocks(css=CSS, title="Steel Surface Defect Detection") as demo:
     gr.Markdown("""
     # 🏭 Steel Surface Defect Detection
@@ -162,32 +161,32 @@ with gr.Blocks(css=CSS, title="Steel Surface Defect Detection") as demo:
                 show_label=True
             )
             
-            # Add example images
-            gr.Examples(
-                examples=[
-                    os.path.join("examples", "crazing_sample.jpg"),
-                    os.path.join("examples", "inclusion_sample.jpg"),
-                    os.path.join("examples", "scratches_sample.jpg")
-                ],
-                inputs=image_input,
-                label="Example Images (Click to load)"
-            )
+            
+            # gr.Examples(
+            #     examples=[
+            #         os.path.join("examples", "crazing_sample.jpg"),
+            #         os.path.join("examples", "inclusion_sample.jpg"),
+            #         os.path.join("examples", "scratches_sample.jpg")
+            #     ],
+            #     inputs=image_input,
+            #     label="Example Images (Click to load)"
+            # )
     
-    # Set up button click
+    
     submit_btn.click(
         fn=process_image,
         inputs=image_input,
         outputs=output_json
     )
 
-    # Add footer
+ 
     gr.Markdown("""
     <div style='text-align: center; margin-top: 20px; color: #666;'>
         Steel Surface Defect Detection System | Made with Gradio
     </div>
     """)
 
-# Launch the app
+
 if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
